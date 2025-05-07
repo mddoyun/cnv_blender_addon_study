@@ -1,1 +1,3 @@
 /.mddoyun
+/__pycache__
+*.pyc

@@ -7,6 +7,8 @@ import numpy as np
 import multiprocessing
 import math
 
+
+
 bl_info = {
     "name": "cnv_blender_addon_study",
     "author": "mddoyun",
@@ -26,7 +28,10 @@ class CNVProperties(bpy.types.PropertyGroup):
     checklist2_result: bpy.props.StringProperty(name="결과2", default="확인 버튼을 클릭하여 결과를 확인하세요.")
     checklist3_result: bpy.props.StringProperty(name="결과3", default="확인 버튼을 클릭하여 결과를 확인하세요.")
 
-# --- 기존 Operator ---
+    valid_ids: bpy.props.StringProperty(default="")
+    invalid_ids: bpy.props.StringProperty(default="")
+
+# --- Ray Test Operator ---
 class Operator_cnv_test(bpy.types.Operator):
     bl_idname = "object.add_cube"
     bl_label = "Add Cube"
@@ -43,7 +48,7 @@ class Operator_cnv_test(bpy.types.Operator):
         list_of_target = ifcopenshell.util.selector.filter_elements(
             ifc_file, "My_Data.cnv_class=target"
         )
-        print(list_of_target)
+
         RAY_COUNT = ray_count_input_value
         RAY_LENGTH = ray_length_input_value
 
@@ -60,7 +65,6 @@ class Operator_cnv_test(bpy.types.Operator):
                 if not iterator.next():
                     break
 
-        i = 1
         for element in list_of_target:
             shape = ifcopenshell.geom.create_shape(settings, element)
             geometry = shape.geometry
@@ -81,50 +85,89 @@ class Operator_cnv_test(bpy.types.Operator):
             context.scene.cnv_props.last_cross_count = cross_count
         return {"FINISHED"}
 
-# --- 체크리스트1 Operator ---
+# --- 체크리스트1 확인 Operator ---
 class Operator_checklist1(bpy.types.Operator):
     bl_idname = "object.checklist1"
     bl_label = "확인"
 
     def execute(self, context):
         try:
-
             ifc_file = ifcopenshell.open(bpy.data.scenes["Scene"].BIMProperties.ifc_file)
+            valid_ids = []
+            invalid_ids = []
 
-            # IFC 파일 열기
-
-            # Test
             for e in ifc_file.by_type("IfcElement"):
                 psets = ifcopenshell.util.element.get_psets(e)
-                if "cpted" in psets:
-                    print(psets["cpted"])
+                cpted = psets.get("cpted", {})
+                obj_type = cpted.get("객체구분", "")
+                if "주출입구" in obj_type:
+                    if cpted.get("영역구분시설물포함여부") is True:
+                        valid_ids.append(e.GlobalId)
+                    else:
+                        invalid_ids.append(e.GlobalId)
 
-            # 1. '객체구분'이 '주출입구'인 객체 필터링
-            main_entrances = ifcopenshell.util.selector.filter_elements(ifc_file, "cpted.객체구분=\x08주출입구")
-            print(main_entrances)
-            if not main_entrances:
-                context.scene.cnv_props.checklist1_result =main_entrances
-                return {"FINISHED"}
+            context.scene.cnv_props.valid_ids = ",".join(valid_ids)
+            context.scene.cnv_props.invalid_ids = ",".join(invalid_ids)
 
-            # 2. 각 객체의 '영역구분시설물포함여부'가 True인지 확인
-            all_valid = True
-            for e in main_entrances:
-                result = ifcopenshell.util.selector.get_element_value(e, "cpted.영역구분시설물포함여부")
-                print(result)
-                if result is not True:
-                    all_valid = False
-                    break
-
-            context.scene.cnv_props.checklist1_result = "적합" if all_valid else "부적합"
+            if not (valid_ids or invalid_ids):
+                context.scene.cnv_props.checklist1_result = "부적합 (주출입구 없음)"
+            elif invalid_ids:
+                context.scene.cnv_props.checklist1_result = "부적합"
+            else:
+                context.scene.cnv_props.checklist1_result = "적합"
 
         except Exception as e:
             context.scene.cnv_props.checklist1_result = f"오류 발생: {str(e)}"
 
         return {"FINISHED"}
 
+# --- 적합 객체 출력 ---
+class Operator_checklist1_show_valid(bpy.types.Operator):
+    bl_idname = "object.checklist1_valid"
+    bl_label = "적합한 객체 확인"
+
+    def execute(self, context):
+        valid_ids = context.scene.cnv_props.valid_ids.split(",")
+        bpy.ops.object.select_all(action='DESELECT')  # 선택 초기화
+
+        selected = 0
+        for gid in valid_ids:
+            bpy.ops.bim.select_similar(key=gid, calculated_sum=0)
+            selected += 1
 
 
-# --- 체크리스트2 Operator ---
+
+        if selected == 0:
+            self.report({'WARNING'}, "선택할 적합 객체가 없습니다.")
+        else:
+            self.report({'INFO'}, f"{selected}개 적합 객체 선택 완료")
+        return {"FINISHED"}
+
+
+# --- 부적합 객체 출력 ---
+class Operator_checklist1_show_invalid(bpy.types.Operator):
+    bl_idname = "object.checklist1_invalid"
+    bl_label = "부적합한 객체 확인"
+
+    def execute(self, context):
+        invalid_ids = context.scene.cnv_props.invalid_ids.split(",")
+        bpy.ops.object.select_all(action='DESELECT')  # 선택 초기화
+
+        selected = 0
+        for gid in invalid_ids:
+            if gid in bpy.data.objects:
+                obj = bpy.data.objects[gid]
+                obj.select_set(True)
+                selected += 1
+
+        if selected == 0:
+            self.report({'WARNING'}, "선택할 부적합 객체가 없습니다.")
+        else:
+            self.report({'INFO'}, f"{selected}개 부적합 객체 선택 완료")
+        return {"FINISHED"}
+
+
+# --- 체크리스트2/3 Operator (더미) ---
 class Operator_checklist2(bpy.types.Operator):
     bl_idname = "object.checklist2"
     bl_label = "확인"
@@ -133,7 +176,6 @@ class Operator_checklist2(bpy.types.Operator):
         context.scene.cnv_props.checklist2_result = "체크리스트2 결과 OK"
         return {"FINISHED"}
 
-# --- 체크리스트3 Operator ---
 class Operator_checklist3(bpy.types.Operator):
     bl_idname = "object.checklist3"
     bl_label = "확인"
@@ -142,7 +184,7 @@ class Operator_checklist3(bpy.types.Operator):
         context.scene.cnv_props.checklist3_result = "체크리스트3 결과 OK"
         return {"FINISHED"}
 
-# --- 기존 CNV UI 패널 ---
+# --- UI 패널들 ---
 class Panel_view3d_ui_cnv_test(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -156,11 +198,9 @@ class Panel_view3d_ui_cnv_test(bpy.types.Panel):
         row = layout.row(align=True)
         row.prop(cnv_props, "ray_count_input")
         row.prop(cnv_props, "ray_length_input")
-
         layout.operator("object.add_cube")
         layout.label(text=f"간섭 수: {cnv_props.last_cross_count}")
 
-# --- 체크리스트1 패널 ---
 class Panel_checklist1(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -170,11 +210,13 @@ class Panel_checklist1(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         layout.label(text="단지의 주출입구는 영역 구분을 위한 시설물을 계획한다.")
-
         layout.operator("object.checklist1")
         layout.label(text=f"결과: {context.scene.cnv_props.checklist1_result}")
+        layout.separator()
+        row = layout.row(align=True)
+        row.operator("object.checklist1_valid", text="적합한 객체 확인")
+        row.operator("object.checklist1_invalid", text="부적합한 객체 확인")
 
-# --- 체크리스트2 패널 ---
 class Panel_checklist2(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -184,11 +226,9 @@ class Panel_checklist2(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         layout.label(text="단지의 차량 출입구에는 감시와 출입 통제를 위한 시설물을 계획한다.")
-
         layout.operator("object.checklist2")
         layout.label(text=f"결과: {context.scene.cnv_props.checklist2_result}")
 
-# --- 체크리스트3 패널 ---
 class Panel_checklist3(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -198,7 +238,6 @@ class Panel_checklist3(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         layout.label(text="단지의 보행자 출입구에는 영역 구분을 위한 시설물을 계획한다.")
-
         layout.operator("object.checklist3")
         layout.label(text=f"결과: {context.scene.cnv_props.checklist3_result}")
 
@@ -207,13 +246,14 @@ classes = [
     CNVProperties,
     Operator_cnv_test,
     Operator_checklist1,
+    Operator_checklist1_show_valid,
+    Operator_checklist1_show_invalid,
     Operator_checklist2,
-    Operator_checklist3,    
+    Operator_checklist3,
     Panel_view3d_ui_cnv_test,
     Panel_checklist1,
     Panel_checklist2,
     Panel_checklist3,
-
 ]
 
 def register():

@@ -54,6 +54,12 @@ class CNVProperties(bpy.types.PropertyGroup):
     checklist3_valid_ids: bpy.props.StringProperty(default="")
     checklist3_invalid_ids: bpy.props.StringProperty(default="")
 
+    # ---checklist4---
+    checklist3_result: bpy.props.StringProperty(name="결과4", default="확인 버튼을 클릭하여 결과를 확인하세요.")
+    checklist3_valid_ids: bpy.props.StringProperty(default="")
+    checklist3_invalid_ids: bpy.props.StringProperty(default="")
+
+
 # --- 공통도구 정의 ---
 ## --- 정리도구 ---
 class Operator_clean(bpy.types.Operator):
@@ -70,7 +76,6 @@ class Operator_clean(bpy.types.Operator):
 
 
         return {"FINISHED"}
-
 
 # --- 체크리스트1 --- 과업 중 2단계 항목 중 전체 기능 포함(1/1)
 ## --- 체크리스트1 UI 추가 ---
@@ -406,8 +411,7 @@ class Operator_checklist2_reset(bpy.types.Operator):
 
 
 
-
-# --- 체크리스트3 --- 과업 중 1단계 항목 중 1(2/10)
+# --- 체크리스트3 --- 과업 중 1단계 항목 중 1(1/10)
 ## --- 체크리스트3 UI 추가 ---
 class Panel_checklist3(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
@@ -422,29 +426,31 @@ class Panel_checklist3(bpy.types.Panel):
         layout.label(text=f"결과: {context.scene.cnv_props.checklist3_result}")
         layout.separator()
         row = layout.row(align=True)
-        row.operator("object.checklist3_valid", text="적합한 객체 확인")
-        row.operator("object.checklist3_invalid", text="부적합한 객체 확인")
-
-
+        row.operator("object.checklist3_reset", text="리셋")
 
 ## --- 체크리스트3 확인 Operator ---
 class Operator_checklist3(bpy.types.Operator):
     bl_idname = "object.checklist3"
     bl_label = "확인"
+    bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
         try:
-            ifc_file_path = context.scene.BIMProperties.ifc_file
-            ifc_file = ifcopenshell.open(ifc_file_path)
+            # 모든 기존 객체에서 이전 태그 제거
+            for obj in bpy.data.objects:
+                if "was_hidden_by_checklist3" in obj:
+                    del obj["was_hidden_by_checklist3"]
+
+            ifc_file = ifcopenshell.open(bpy.data.scenes["Scene"].BIMProperties.ifc_file)
             valid_ids = []
             invalid_ids = []
 
             for e in ifc_file.by_type("IfcElement"):
                 psets = ifcopenshell.util.element.get_psets(e)
                 cpted = psets.get("cpted", {})
-                obj_type = cpted.get("객체구분2", "")
-                if "주출입구" in obj_type:
-                    if cpted.get("출입통제시설물포함여부") is True and cpted.get("감시시설물포함여부") is True:
+                obj_type = cpted.get("객체구분", "")
+                if "출입구" in obj_type:
+                    if cpted.get("영역구분시설물포함여부") is True:
                         valid_ids.append(e.GlobalId)
                     else:
                         invalid_ids.append(e.GlobalId)
@@ -459,56 +465,263 @@ class Operator_checklist3(bpy.types.Operator):
             else:
                 context.scene.cnv_props.checklist3_result = "적합"
 
+            settings = ifcopenshell.geom.settings()
+            settings.set(settings.USE_WORLD_COORDS, True)
+
+            def get_or_create_material(name, color):
+                mat = bpy.data.materials.get(name)
+                if not mat:
+                    mat = bpy.data.materials.new(name=name)
+                    mat.use_nodes = False
+                    mat.diffuse_color = color
+                return mat
+
+            blue_mat = get_or_create_material("ValidMaterial", (0.0, 0.4, 1.0, 1.0))    # 파란색
+            red_mat = get_or_create_material("InvalidMaterial", (1.0, 0.1, 0.1, 1.0))   # 빨간색
+
+            def create_and_link_object(gid, color_mat, label):
+                element = ifc_file.by_guid(gid)
+                if not element:
+                    return None
+                shape = ifcopenshell.geom.create_shape(settings, element)
+                geometry = shape.geometry
+                verts = np.array(geometry.verts).reshape(-1, 3)
+                faces = np.array(geometry.faces).reshape(-1, 3)
+
+                mesh_data = bpy.data.meshes.new(name=f"{label}_{gid}")
+                mesh_data.from_pydata(verts.tolist(), [], faces.tolist())
+                mesh_data.update()
+
+                obj = bpy.data.objects.new(f"{label}_{gid}", mesh_data)
+                obj.data.materials.append(color_mat)
+                bpy.context.collection.objects.link(obj)
+
+                return obj
+
+            def vertices_match(obj1, obj2, epsilon=1e-6):
+                if obj1.type != 'MESH' or obj2.type != 'MESH':
+                    return False
+
+                verts1 = [tuple((obj1.matrix_world @ v.co)[:]) for v in obj1.data.vertices]
+                verts2 = [tuple((obj2.matrix_world @ v.co)[:]) for v in obj2.data.vertices]
+
+                if len(verts1) != len(verts2):
+                    return False
+
+                verts1_sorted = sorted(verts1)
+                verts2_sorted = sorted(verts2)
+
+                for v1, v2 in zip(verts1_sorted, verts2_sorted):
+                    if any(abs(a - b) > epsilon for a, b in zip(v1, v2)):
+                        return False
+
+                return True
+
+            new_objects = []
+
+            for gid in valid_ids:
+                obj = create_and_link_object(gid, blue_mat, "Valid")
+                if obj:
+                    new_objects.append(obj)
+
+            for gid in invalid_ids:
+                obj = create_and_link_object(gid, red_mat, "Invalid")
+                if obj:
+                    new_objects.append(obj)
+
+            # 기존 객체 중 geometry가 완전히 같은 경우 숨기기
+            for new_obj in new_objects:
+                for obj in bpy.data.objects:
+                    if obj == new_obj or obj.hide_get():
+                        continue
+                    if obj.type != 'MESH':
+                        continue
+
+                    if vertices_match(obj, new_obj):
+                        obj.hide_set(True)
+                        obj["was_hidden_by_checklist3"] = True  # 🔷 리셋 시 복원용 태그
         except Exception as e:
             context.scene.cnv_props.checklist3_result = f"오류 발생: {str(e)}"
 
         return {"FINISHED"}
 
-## --- 체크리스트3 적합 객체 출력 ---
-class Operator_checklist3_show_valid(bpy.types.Operator):
-    bl_idname = "object.checklist3_valid"
-    bl_label = "적합한 객체 확인"
+## --- 체크리스트3 리셋 Operator ---
+class Operator_checklist3_reset(bpy.types.Operator):
+    bl_idname = "object.checklist3_reset"
+    bl_label = "리셋"
+    bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
-        valid_ids = [gid for gid in context.scene.cnv_props.checklist3_valid_ids.split(",") if gid]
-        bpy.ops.object.select_all(action='DESELECT')  # 선택 초기화
+        # 숨긴 객체 다시 보이게
+        for obj in bpy.data.objects:
+            if obj.get("was_hidden_by_checklist3"):
+                obj.hide_set(False)
+                del obj["was_hidden_by_checklist3"]
 
-        selected = 0
-        for gid in valid_ids:
-            bpy.ops.bim.select_similar(key=gid, calculated_sum=0)
-            selected += 1
+        # 생성된 Valid, Invalid 객체 삭제
+        for obj in list(bpy.data.objects):
+            if obj.name.startswith("Valid_") or obj.name.startswith("Invalid_"):
+                bpy.data.objects.remove(obj, do_unlink=True)
 
-        if selected == 0:
-            self.report({'WARNING'}, "선택할 적합 객체가 없습니다.")
-        else:
-            self.report({'INFO'}, f"{selected}개 적합 객체 선택 완료")
-        return {"FINISHED"}
-
-## --- 체크리스트3 부적합 객체 출력 ---
-class Operator_checklist3_show_invalid(bpy.types.Operator):
-    bl_idname = "object.checklist3_invalid"
-    bl_label = "부적합한 객체 확인"
-
-    def execute(self, context):
-        invalid_ids = [gid for gid in context.scene.cnv_props.checklist3_invalid_ids.split(",") if gid]
-        bpy.ops.object.select_all(action='DESELECT')  # 선택 초기화
-
-        selected = 0
-        for gid in invalid_ids:
-            if gid in bpy.data.objects:
-                obj = bpy.data.objects[gid]
-                obj.select_set(True)
-                selected += 1
-
-        if selected == 0:
-            self.report({'WARNING'}, "선택할 부적합 객체가 없습니다.")
-        else:
-            self.report({'INFO'}, f"{selected}개 부적합 객체 선택 완료")
+        self.report({'INFO'}, "체크리스트3 상태 초기화 완료")
         return {"FINISHED"}
 
 
 
+# --- 체크리스트3 --- 과업 중 1단계 항목 중 1(1/10)
+## --- 체크리스트3 UI 추가 ---
+class Panel_checklist3(bpy.types.Panel):
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "CPTED 검토"
+    bl_label = "공적영역-단지출입구-3"
 
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="단지의 차량 출입구에는 감시와 출입 통제를 위한 시설물을 계획한다.")
+        layout.operator("object.checklist3")
+        layout.label(text=f"결과: {context.scene.cnv_props.checklist3_result}")
+        layout.separator()
+        row = layout.row(align=True)
+        row.operator("object.checklist3_reset", text="리셋")
+
+## --- 체크리스트3 확인 Operator ---
+class Operator_checklist3(bpy.types.Operator):
+    bl_idname = "object.checklist3"
+    bl_label = "확인"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        try:
+            # 모든 기존 객체에서 이전 태그 제거
+            for obj in bpy.data.objects:
+                if "was_hidden_by_checklist3" in obj:
+                    del obj["was_hidden_by_checklist3"]
+
+            ifc_file = ifcopenshell.open(bpy.data.scenes["Scene"].BIMProperties.ifc_file)
+            valid_ids = []
+            invalid_ids = []
+
+            for e in ifc_file.by_type("IfcElement"):
+                psets = ifcopenshell.util.element.get_psets(e)
+                cpted = psets.get("cpted", {})
+                obj_type = cpted.get("객체구분", "")
+                if "출입구" in obj_type:
+                    if cpted.get("영역구분시설물포함여부") is True:
+                        valid_ids.append(e.GlobalId)
+                    else:
+                        invalid_ids.append(e.GlobalId)
+
+            context.scene.cnv_props.checklist3_valid_ids = ",".join(valid_ids)
+            context.scene.cnv_props.checklist3_invalid_ids = ",".join(invalid_ids)
+
+            if not (valid_ids or invalid_ids):
+                context.scene.cnv_props.checklist3_result = "부적합 (주출입구 없음)"
+            elif invalid_ids:
+                context.scene.cnv_props.checklist3_result = "부적합"
+            else:
+                context.scene.cnv_props.checklist3_result = "적합"
+
+            settings = ifcopenshell.geom.settings()
+            settings.set(settings.USE_WORLD_COORDS, True)
+
+            def get_or_create_material(name, color):
+                mat = bpy.data.materials.get(name)
+                if not mat:
+                    mat = bpy.data.materials.new(name=name)
+                    mat.use_nodes = False
+                    mat.diffuse_color = color
+                return mat
+
+            blue_mat = get_or_create_material("ValidMaterial", (0.0, 0.4, 1.0, 1.0))    # 파란색
+            red_mat = get_or_create_material("InvalidMaterial", (1.0, 0.1, 0.1, 1.0))   # 빨간색
+
+            def create_and_link_object(gid, color_mat, label):
+                element = ifc_file.by_guid(gid)
+                if not element:
+                    return None
+                shape = ifcopenshell.geom.create_shape(settings, element)
+                geometry = shape.geometry
+                verts = np.array(geometry.verts).reshape(-1, 3)
+                faces = np.array(geometry.faces).reshape(-1, 3)
+
+                mesh_data = bpy.data.meshes.new(name=f"{label}_{gid}")
+                mesh_data.from_pydata(verts.tolist(), [], faces.tolist())
+                mesh_data.update()
+
+                obj = bpy.data.objects.new(f"{label}_{gid}", mesh_data)
+                obj.data.materials.append(color_mat)
+                bpy.context.collection.objects.link(obj)
+
+                return obj
+
+            def vertices_match(obj1, obj2, epsilon=1e-6):
+                if obj1.type != 'MESH' or obj2.type != 'MESH':
+                    return False
+
+                verts1 = [tuple((obj1.matrix_world @ v.co)[:]) for v in obj1.data.vertices]
+                verts2 = [tuple((obj2.matrix_world @ v.co)[:]) for v in obj2.data.vertices]
+
+                if len(verts1) != len(verts2):
+                    return False
+
+                verts1_sorted = sorted(verts1)
+                verts2_sorted = sorted(verts2)
+
+                for v1, v2 in zip(verts1_sorted, verts2_sorted):
+                    if any(abs(a - b) > epsilon for a, b in zip(v1, v2)):
+                        return False
+
+                return True
+
+            new_objects = []
+
+            for gid in valid_ids:
+                obj = create_and_link_object(gid, blue_mat, "Valid")
+                if obj:
+                    new_objects.append(obj)
+
+            for gid in invalid_ids:
+                obj = create_and_link_object(gid, red_mat, "Invalid")
+                if obj:
+                    new_objects.append(obj)
+
+            # 기존 객체 중 geometry가 완전히 같은 경우 숨기기
+            for new_obj in new_objects:
+                for obj in bpy.data.objects:
+                    if obj == new_obj or obj.hide_get():
+                        continue
+                    if obj.type != 'MESH':
+                        continue
+
+                    if vertices_match(obj, new_obj):
+                        obj.hide_set(True)
+                        obj["was_hidden_by_checklist3"] = True  # 🔷 리셋 시 복원용 태그
+        except Exception as e:
+            context.scene.cnv_props.checklist3_result = f"오류 발생: {str(e)}"
+
+        return {"FINISHED"}
+
+## --- 체크리스트4 리셋 Operator ---
+class Operator_checklist3_reset(bpy.types.Operator):
+    bl_idname = "object.checklist3_reset"
+    bl_label = "리셋"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        # 숨긴 객체 다시 보이게
+        for obj in bpy.data.objects:
+            if obj.get("was_hidden_by_checklist3"):
+                obj.hide_set(False)
+                del obj["was_hidden_by_checklist3"]
+
+        # 생성된 Valid, Invalid 객체 삭제
+        for obj in list(bpy.data.objects):
+            if obj.name.startswith("Valid_") or obj.name.startswith("Invalid_"):
+                bpy.data.objects.remove(obj, do_unlink=True)
+
+        self.report({'INFO'}, "체크리스트3 상태 초기화 완료")
+        return {"FINISHED"}
 
 
 
@@ -529,9 +742,8 @@ classes = [
 
     # -- 체크리스트3 ---
     Operator_checklist3,
-    Operator_checklist3_show_valid,
-    Operator_checklist3_show_invalid,
-    Panel_checklist3, 
+    Operator_checklist3_reset,
+    Panel_checklist3,
 
 ]
 

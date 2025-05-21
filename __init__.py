@@ -17,9 +17,6 @@ open3d_path = os.path.join(addon_dir, ".mddoyun", "lib", "python3.11", "site-pac
 if open3d_path not in sys.path:
     sys.path.append(open3d_path)
 
-
-
-
 import open3d as o3d
 
 
@@ -471,6 +468,12 @@ class Panel_checklist3(bpy.types.Panel):
         layout.separator()
         row = layout.row(align=True)
         row.operator("object.checklist3_reset", text="리셋")
+
+
+
+
+
+
 
 ## --- 체크리스트3 확인 Operator ---
 class Operator_checklist3(bpy.types.Operator):
@@ -2305,6 +2308,13 @@ def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
     del bpy.types.Scene.cnv_props
+
+
+
+
+
+
+
 
 
 # 참고함수

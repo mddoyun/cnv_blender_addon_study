@@ -528,6 +528,75 @@ class Operator_preprocess1(bpy.types.Operator):
         return {'FINISHED'}
 
 
+
+# ---전처리2---(type : Geometry 기반 높이정보 데이터입력 자동화)
+class Panel_preprocess2(bpy.types.Panel):
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "CPTED 전처리"
+    bl_label = "형상 기반 높이 계산"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="객체구분이 '나무'인 객체의 높이를 계산하여 속성에 저장합니다.")
+        layout.operator("object.preprocess2")
+
+
+class Operator_preprocess2(bpy.types.Operator):
+    bl_idname = "object.preprocess2"
+    bl_label = "높이 계산 및 속성 입력"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        ifc_file = ifcopenshell.open(bpy.data.scenes["Scene"].BIMProperties.ifc_file)
+        settings = ifcopenshell.geom.settings()
+        settings.set(settings.USE_WORLD_COORDS, True)
+        print('시작')
+        # 'cpted.객체구분' == '나무' 필터링
+        tree_elements = [
+            e for e in ifc_file.by_type("IfcElement")
+            if get_psets(e).get("cpted", {}).get("객체구분") == "나무"
+        ]
+        print(f"🎋 '나무' 객체 수: {len(tree_elements)}")
+
+        for element in tree_elements:
+            try:
+                shape = ifcopenshell.geom.create_shape(settings, element)
+                verts = np.array(shape.geometry.verts).reshape(-1, 3)
+
+                z_min = verts[:, 2].min()
+                z_max = verts[:, 2].max()
+                height = round(float(z_max - z_min), 2)
+                print(f"{element.Name} 높이: {height}m")
+
+                # Pset이 없으면 생성
+                run("pset.add_pset", ifc_file, product=element, name="cpted")
+
+                # Pset 엔티티 가져오기
+                pset_entity = None
+                for rel in ifc_file.get_inverse(element):
+                    if rel.is_a("IfcRelDefinesByProperties") and rel.RelatingPropertyDefinition.Name == "cpted":
+                        pset_entity = rel.RelatingPropertyDefinition
+                        break
+
+                if pset_entity:
+                    run("pset.edit_pset", ifc_file, pset=pset_entity, properties={
+                        "높이": height
+                    })
+            except Exception as e:
+                print(f"⚠️ {element.Name} 처리 중 오류 발생: {str(e)}")
+
+        # 저장 및 리로드
+        ifc_file.write(bpy.data.scenes["Scene"].BIMProperties.ifc_file)
+        bpy.ops.bim.revert_project()
+        self.report({'INFO'}, "전처리2 완료: 높이 속성 입력 완료")
+        return {'FINISHED'}
+
+
+
+
+
+
 # --- 등록 클래스 목록 ---
 classes = [
     CNVProperties,
@@ -544,6 +613,12 @@ classes = [
     # --- 전처리1 ---
     Panel_preprocess1,
     Operator_preprocess1,
+
+    # --- 전처리2 ---
+    Panel_preprocess2,
+    Operator_preprocess2,
+
+
 ]
 
 def register():

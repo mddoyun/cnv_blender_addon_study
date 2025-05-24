@@ -109,9 +109,11 @@ class Operator_checklist1(bpy.types.Operator):
         ifc_file = ifcopenshell.open(bpy.data.scenes["Scene"].BIMProperties.ifc_file)
 
         # 'cpted.객체구분' 속성이 '출입구'를 포함하는 객체만 필터링
-        list_of_target = ifcopenshell.util.selector.filter_elements(
-            ifc_file, "cpted.객체구분*=출입구"
-        )
+        list_of_target = [
+            e for e in ifcopenshell.util.selector.filter_elements(ifc_file, "cpted.객체구분*=출입구")
+            if hasattr(e, "Representation") and e.Representation
+        ]
+
         print(list_of_target)
 
         # IFC 형상 설정 (월드 좌표계 기준)
